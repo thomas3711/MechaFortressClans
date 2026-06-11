@@ -17,6 +17,7 @@ public class GameManager : MonoBehaviour
 
     private void Start()
     {
+        // Testing dummy data
         CreateMainPlayer();
         GenerateRandomPlayers();
         GenerateRandomClans();

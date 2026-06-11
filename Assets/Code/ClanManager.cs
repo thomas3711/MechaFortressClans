@@ -23,24 +23,6 @@ public class ClanManager : MonoBehaviour
         Instance = this;
     }
 
-    public void Start()
-    {
-        Initialize();
-    }
-
-    public void Initialize()
-    {
-        /*clans.Clear();
-        clans = Database.Instance.GetAllClans();
-
-        Debug.Log("ClanManager Initialize. Loaded clans: " + clans.Count);
-
-        foreach (var clan in clans)
-        {
-            ui_manager.AddClanToList(clan);
-        }*/
-    }
-
     public Clan GetClan(string uid)
     {
         foreach (var clan in clans)
@@ -58,8 +40,6 @@ public class ClanManager : MonoBehaviour
     {
         clans.Add(clan_to_add);
         ui_manager.AddClanToList(clan_to_add);
-
-        // TODO: Save to database
     }
 
     public void RemoveClan(Clan clan_to_remove)
@@ -72,8 +52,6 @@ public class ClanManager : MonoBehaviour
 
         clans.Remove(clan_to_remove);
         ui_manager.RemoveClanFromList(clan_to_remove);
-
-        // TODO: Remove from database
     }
 
     public void Save()

@@ -20,11 +20,6 @@ public class PlayerManager : MonoBehaviour
         Instance = this;
     }
 
-    public void Start()
-    {
-        Initialize();
-    }
-
     public Player GetPlayer(string uid)
     {
         foreach (var player in players)
@@ -69,13 +64,5 @@ public class PlayerManager : MonoBehaviour
         }
 
         return players_to_return;
-    }
-
-    public void Initialize()
-    {
-        /*players.Clear();
-        players = Database.Instance.GetAllPlayers();
-
-        Debug.Log("PlayerManager Initialize. Loaded players: " + players.Count);*/
     }
 }
