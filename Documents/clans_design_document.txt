@@ -1,0 +1,2123 @@
+================================================================================
+MECHA FORTRESS - CLAN SYSTEM ARCHITECTURE DESIGN DOCUMENT
+================================================================================
+
+Version: 1.0
+Date: 2026-06-11
+Status: Design Phase (Partial Implementation)
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+This document outlines the architecture for a comprehensive Clan system for the
+game Mecha Fortress. The design takes into account an existing prototype 
+implementation (simple hot data example) and provides a roadmap for extending
+it to support a real backend infrastructure.
+
+The system is designed to be scalable, secure, and maintainable, with clear
+separation of concerns between client-side logic, server-side business logic,
+and data persistence.
+
+================================================================================
+2. IMPLEMENTATION STATUS
+================================================================================
+
+COMPLETED/PARTIALLY IMPLEMENTED:
+---------------------------------
+✓ Basic Clan data model (Clan.cs)
+  - Clan metadata (name, UID, member list, owner)
+  - Member management (AddPlayer, RemovePlayer)
+  - Max member limit (currently 10, should be 100)
+  - Power Score calculation (basic and weighted)
+  - Owner transfer on last member removal
+
+✓ Player model (Player.cs)
+  - Player identity (name, UID, power)
+  - Clan membership tracking
+  - Clan transfer cooldown system (time-based, 10 seconds)
+  - State management (IsInClan, IsAllowedToJoinClan)
+
+✓ Manager Singletons (ClanManager.cs, PlayerManager.cs, GameManager.cs)
+  - In-memory data structures
+  - Basic CRUD operations
+  - UI integration points
+
+✓ Basic UI Components
+  - Clan list display
+  - Clan details view
+  - Player information display
+
+NOT IMPLEMENTED (TO DO):
+------------------------
+✗ Role & Permission system (beyond owner)
+✗ Invite-only clan functionality
+✗ Clan Chat system
+✗ Leaderboard & ranking
+✗ Supplies Request feature
+✗ Proper clan transfer cooldown (weekly per player)
+✗ Backend API integration
+✗ Data persistence (save/load from database)
+✗ Account-based authentication
+✗ Request validation & anti-cheat measures
+✗ Edge case handling & error recovery
+
+================================================================================
+3. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+The system is divided into three layers:
+
+    ┌─────────────────────────────────────────────────────┐
+    │         UNITY CLIENT (Local Game Instance)           │
+    │  - UI Rendering & User Interaction                  │
+    │  - Local State Management (hot data)                │
+    │  - Request Validation & Optimistic Updates          │
+    └──────────────────────┬──────────────────────────────┘
+                           │
+                    HTTP/WebSocket
+                           │
+    ┌──────────────────────┴──────────────────────────────┐
+    │              BACKEND SERVER (REST API)               │
+    │  - Authoritative Game State                         │
+    │  - Business Logic & Validation                      │
+    │  - Database Persistence                            │
+    │  - Anti-cheat & Security                           │
+    └─────────────────────────────────────────────────────┘
+
+
+CLIENT-SIDE RESPONSIBILITIES:
+-----------------------------
+1. UI Rendering & Interaction
+   - Display clans, players, chat messages
+   - Accept user input (create clan, send message, etc.)
+   - Real-time UI updates
+
+2. Local State Management
+   - Cache clan data, player info, chat history
+   - Maintain session state (current player, current clan)
+   - Track UI state (open windows, selections)
+
+3. Request Queueing & Optimistic Updates
+   - Queue user actions before server confirmation
+   - Show optimistic UI updates immediately
+   - Revert on server rejection
+
+4. Input Validation
+   - Basic validation (name length, empty fields, etc.)
+   - Local cooldown checks
+   - Format validation
+
+SERVER-SIDE RESPONSIBILITIES:
+-----------------------------
+1. Authoritative State Management
+   - Source of truth for all game state
+   - Atomic transactions for multi-step operations
+   - Conflict resolution & data consistency
+
+2. Business Logic & Validation
+   - Enforce all rules & constraints
+   - Permission checks
+   - Anti-cheat measures
+   - Reward generation & verification
+
+3. Data Persistence
+   - Save/load from database
+   - Historical tracking (timestamps, audit logs)
+   - Data integrity & backup
+
+4. Security & Authentication
+   - Player authentication
+   - Request signing & validation
+   - Rate limiting & DDoS protection
+   - Fraud prevention
+
+================================================================================
+4. DATA MODELS & STRUCTURES
+================================================================================
+
+4.1 PLAYER DATA MODEL
+=====================
+
+Current (Client-side):
+-----------------------
+class Player
+{
+    string player_name
+    string uid                          // Unique identifier
+    int power                           // 0-1000, determines player strength
+    string clan_uid                     // Empty if not in clan
+    float _last_clan_join_time          // Timestamp of last clan join
+    float time_between_allowed_clan_join // Cooldown (currently 10 seconds)
+}
+
+Extended (For Backend):
+------------------------
+class PlayerProfile
+{
+    // Identity
+    string uid
+    string account_id                   // Links to authentication system
+    string player_name
+    long created_timestamp              // UTC timestamp of account creation
+    
+    // Game State
+    int power                           // 0-1000
+    string clan_uid                     // Current clan membership
+    
+    // Clan Transfer System
+    long last_clan_transfer_time        // Timestamp of last transfer
+    int clan_transfers_this_week        // Counter for weekly limit
+    string clan_transfer_targets[]      // History of recent clan changes
+    
+    // Supplies System
+    long last_supplies_request_time     // Timestamp of last request (per clan)
+    string last_supplies_clan_uid       // Which clan was the request for
+    
+    // Account Status
+    bool is_active                      // Account enabled/disabled
+    bool is_banned                      // Banned from clan system
+    long updated_timestamp              // Last modification time
+}
+
+4.2 CLAN DATA MODEL
+===================
+
+Current (Client-side):
+----------------------
+class Clan
+{
+    string clan_name
+    string uid
+    bool private_clan
+    List<string> members_uids
+    string owner_player_uid
+    int max_players = 10
+}
+
+Extended (For Backend):
+-----------------------
+class ClanData
+{
+    // Identity
+    string uid
+    string clan_name
+    
+    // Settings
+    bool is_public                      // true=public, false=invite-only
+    string description                  // Clan description/motto
+    long created_timestamp              // UTC creation time
+    
+    // Membership
+    List<ClanMember> members            // See ClanMember below
+    int max_members = 100               // Support up to 100 members
+    string invite_code                  // For invite-only clans
+    long invite_code_expiration         // Code expiration timestamp
+    
+    // Leadership
+    string owner_uid                    // Clan owner UID
+    List<string> admin_uids             // Admin/moderator UIDs
+    
+    // Power & Leaderboard
+    int total_power                     // Cached total power score
+    int weighted_power                  // Cached weighted power (elite bonus)
+    long last_power_update              // Timestamp of last power recalculation
+    
+    // Rules & Moderation
+    List<string> banned_player_uids     // Players banned from clan
+    List<ChatMessage> chat_messages     // Message history (or reference to separate DB)
+    long last_activity_timestamp        // Last modification to clan
+}
+
+class ClanMember
+{
+    string player_uid
+    ClanRole role                       // See ClanRole enum
+    long joined_timestamp
+    int total_power_contributed         // Historical power contribution
+    bool is_active                      // Has logged in recently
+}
+
+4.3 ROLES & PERMISSIONS
+=======================
+
+Enum ClanRole
+{
+    OWNER = 0,              // Can do everything
+    ADMIN = 1,              // Can invite, kick, manage roles, moderate chat
+    MODERATOR = 2,          // Can moderate chat, limited kick power
+    MEMBER = 3              // Can chat, request supplies
+}
+
+PERMISSION MATRIX:
+╔═══════════════════╦═══════╦═══════╦════════════╦════════╗
+║ Action            ║ Owner ║ Admin ║ Moderator  ║ Member ║
+╠═══════════════════╬═══════╬═══════╬════════════╬════════╣
+║ Edit clan info    ║  YES  ║  YES  ║    NO      ║   NO   ║
+║ Invite players    ║  YES  ║  YES  ║    NO      ║   NO   ║
+║ Kick players      ║  YES  ║  YES  ║  MEMBERS   ║   NO   ║
+║ Change roles      ║  YES  ║  NO   ║    NO      ║   NO   ║
+║ Delete clan       ║  YES  ║  NO   ║    NO      ║   NO   ║
+║ Moderate chat     ║  YES  ║  YES  ║   YES      ║   NO   ║
+║ Delete messages   ║  YES  ║  YES  ║   YES      ║   NO   ║
+║ Post in chat      ║  YES  ║  YES  ║   YES      ║  YES   ║
+║ Request supplies  ║  YES  ║  YES  ║   YES      ║  YES   ║
+╚═══════════════════╩═══════╩═══════╩════════════╩════════╝
+
+4.4 CHAT SYSTEM DATA MODEL
+==========================
+
+class ChatMessage
+{
+    string uid                          // Unique message ID
+    string clan_uid                     // Which clan this message belongs to
+    string sender_uid                   // Player who sent it
+    string content                      // Message text
+    long timestamp                      // UTC send time
+    bool is_deleted                     // Soft delete flag
+    List<string> read_by_uids           // Players who have read this (optional)
+}
+
+class ChatChannel
+{
+    string clan_uid                     // Reference to clan
+    List<ChatMessage> messages          // All messages in this channel
+    long created_timestamp
+    int message_count
+    int max_message_history = 1000      // Keep last 1000 messages per clan
+}
+
+4.5 LEADERBOARD DATA MODEL
+==========================
+
+class ClanLeaderboardEntry
+{
+    int rank                            // 1-based rank
+    string clan_uid
+    string clan_name
+    int power_score                     // Total or weighted power
+    int member_count
+    string top_players[]                // Top 3 members by power
+    long updated_timestamp              // When this was last calculated
+}
+
+class LeaderboardCache
+{
+    List<ClanLeaderboardEntry> entries  // Sorted by power descending
+    long cache_expiration_time          // Refresh every 5-15 minutes
+    bool needs_recalculation            // Flag to force refresh
+}
+
+4.6 SUPPLIES REQUEST SYSTEM
+===========================
+
+class SuppliesRequest
+{
+    string uid                          // Unique request ID
+    string requester_uid                // Player requesting supplies
+    string clan_uid                     // Which clan
+    long request_timestamp              // When created
+    List<SuppliesResponse> responses    // Responses from clan members
+    RequestStatus status                // PENDING, ACCEPTED, DECLINED, EXPIRED
+    long expiration_time                // Request expires after 24 hours
+    bool reward_claimed                 // Has requester claimed reward
+}
+
+class SuppliesResponse
+{
+    string responder_uid                // Who responded
+    bool accepted                       // true=accepted, false=declined
+    long response_timestamp
+}
+
+enum RequestStatus
+{
+    PENDING = 0,
+    ACCEPTED = 1,
+    DECLINED = 2,
+    EXPIRED = 3,
+    CLAIMED = 4
+}
+
+4.7 CLAN TRANSFER HISTORY
+=========================
+
+class ClanTransferRecord
+{
+    string player_uid
+    string from_clan_uid                // Previous clan (or null)
+    string to_clan_uid                  // New clan
+    long transfer_timestamp
+    string transfer_reason              // "joined", "left", "kicked", "clan_disbanded"
+}
+
+class PlayerTransferCooldown
+{
+    string player_uid
+    long last_transfer_timestamp
+    int transfers_this_week              // Count of transfers in current week
+    long week_start_timestamp            // When current week started
+}
+
+================================================================================
+5. CORE FEATURES - DETAILED DESIGN
+================================================================================
+
+5.1 CLAN CREATION & BASIC CRUD
+==============================
+
+CREATE CLAN:
+-----------
+Client Action:
+  1. User clicks "Create Clan"
+  2. Opens CreateClanWindow with form:
+     - Clan name (1-50 characters)
+     - Description (0-200 characters)
+     - Public/Invite-only toggle
+  3. Validates input locally
+  4. Sends CreateClanRequest to server
+
+Server Processing:
+  1. Authenticate player
+  2. Verify player not in a clan
+  3. Verify player not banned from clan system
+  4. Validate input (name length, profanity filter, etc.)
+  5. Create clan in database
+  6. Add creator as owner (OWNER role)
+  7. Return ClanCreatedResponse with clan UID
+
+Client Update:
+  1. Receive response
+  2. Add clan to local cache
+  3. Set player's clan_uid
+  4. Redirect to clan details screen
+  5. Show success message
+
+READ CLAN:
+----------
+Fetch via GetClanDetailsRequest:
+  - Server returns full ClanData object
+  - Client caches it locally
+  - Refreshes UI every 30 seconds or on player action
+
+UPDATE CLAN:
+-----------
+Allowed by: Owner, Admin
+Changes: name, description, settings, invite code
+
+Server validates:
+  - Player has permission
+  - Clan exists
+  - Changes don't violate rules
+  - Anti-spam check on name changes (max 1 per week)
+
+DELETE CLAN:
+-----------
+Only Owner can delete
+- Remove all members
+- Remove from leaderboard
+- Delete all messages from database
+- Mark as deleted (keep audit trail)
+- Alternative: if owner leaves, cascade ownership before deletion
+
+LEAVE CLAN:
+-----------
+Client:
+  1. Validates player is in clan
+  2. Checks if only owner (needs to transfer ownership)
+  3. Sends LeaveClanRequest
+
+Server:
+  1. Remove player from members list
+  2. Update clan power score
+  3. If owner left and clan not empty: transfer to next admin or first member
+  4. If clan empty: delete clan
+  5. Return success
+
+5.2 CLAN MEMBERSHIP & ROLES
+===========================
+
+JOIN PUBLIC CLAN:
+-----------------
+Client:
+  1. User selects public clan from list
+  2. Clicks "Join"
+  3. Checks player transfer cooldown
+  4. Checks clan not full
+  5. Sends JoinClanRequest
+
+Server:
+  1. Validate authentication
+  2. Check player not already in clan
+  3. Check clan is public
+  4. Check clan not full (< 100 members)
+  5. Check player not banned from clan
+  6. Check transfer cooldown (1 per week)
+  7. Add player to clan with MEMBER role
+  8. Update clan power score
+  9. Broadcast clan update to members
+  10. Return success
+
+JOIN INVITE-ONLY CLAN:
+----------------------
+Client:
+  1. User enters invite code (via text input)
+  2. Validates code format
+  3. Sends JoinByInviteRequest with code
+
+Server:
+  1. Look up clan by invite code
+  2. Validate code hasn't expired
+  3. Validate code hasn't been used too many times (rate limit)
+  4. Same checks as public join
+  5. Mark as consumed (optional: one-time use or limited use)
+  6. Add player to clan
+
+INVITE CODE MANAGEMENT:
+-----------------------
+Owner/Admin can:
+  - Generate new invite code (random alphanumeric, 8 chars)
+  - Set expiration time (1-30 days)
+  - Set usage limit (1-1000 uses)
+  - Revoke existing codes
+  - View usage statistics
+
+Server stores:
+  - Code string (hashed? for security)
+  - Generated timestamp
+  - Expiration timestamp
+  - Max uses / current uses
+  - List of who used it (for abuse detection)
+
+KICK PLAYER:
+-----------
+Only: Owner (anyone), Admin (non-admins), Moderator (members only)
+
+Client: Player detail → Kick button
+Server:
+  1. Validate kicker has permission
+  2. Can't kick owner (unless transferring first)
+  3. Remove player from clan
+  4. Add to clan's banned list
+  5. Update power score
+  6. Notify both players
+  7. Optional: Supplies requests from kicked player still pending
+
+CHANGE PLAYER ROLE:
+-------------------
+Only: Owner
+
+Client: Player detail → Change Role dropdown
+Server:
+  1. Validate requestor is owner
+  2. Validate target player in clan
+  3. Validate new role valid
+  4. Check no double-owner (can demote current owner first)
+  5. Update database
+  6. Broadcast to clan members
+
+5.3 CLAN TRANSFER SYSTEM (WEEKLY COOLDOWN)
+===========================================
+
+CURRENT IMPLEMENTATION:
+  - 10 second cooldown between clan joins (in Player.cs)
+  - Counts all join attempts, not smart about transfers
+
+REQUIRED IMPLEMENTATION:
+  - 1 transfer per calendar week (Monday-Sunday or rolling)
+  - Count only successful transfers (not failed attempts)
+  - Show time remaining to player
+  - Reset at week boundary
+
+CLIENT-SIDE LOGIC:
+  1. When user clicks "Join Clan":
+     - Check if transfer allowed (< 1 per week)
+     - Show cooldown timer if blocked
+  2. After successful join:
+     - Update UI with countdown to next transfer
+     - Calculate time remaining
+
+SERVER-SIDE LOGIC:
+  1. In PlayerTransferCooldown table:
+     - Store last_transfer_timestamp
+     - Track transfers_this_week (reset on week boundary)
+     - Store week_start_timestamp
+  2. Check transfer allowed:
+     - If timestamp > 7 days ago, reset counter
+     - If transfers_this_week >= 1, deny
+     - Otherwise: allow
+  3. After successful transfer:
+     - Increment transfers_this_week
+     - Update last_transfer_timestamp
+  4. On clan transfer:
+     - Record in ClanTransferRecord (audit trail)
+     - Trigger leaderboard update
+     - Trigger power score recalculation
+
+EDGE CASES:
+  - Midnight timezone boundaries: use UTC timestamps
+  - Player kicked: cooldown still applies
+  - Clan disbanded: player can rejoin immediately? (design decision)
+  - Multiple rapid requests: idempotent (retry-safe)
+
+5.4 CLAN LEADERBOARD
+====================
+
+POWER SCORE CALCULATION:
+
+Current Implementation:
+  - GetClanPower(): Sum of all member power
+  - GetClanPowerWeighted(): Elite bonus system
+    * < 500 power: 1.0x multiplier
+    * 500-800 power: 1.25x multiplier
+    * 800-1000 power: 1.5x multiplier
+
+Extended Design:
+  - Keep both systems: display both raw and weighted
+  - Leaderboard ranks by WEIGHTED power (encourages high-power players)
+  - Visual indicator of raw vs weighted on UI
+
+RANKING ALGORITHM:
+  1. Fetch all active clans from database
+  2. Calculate weighted power for each
+  3. Sort descending by power
+  4. Assign rank (1-N)
+  5. Cache results for 5-15 minutes
+  6. Trigger recalculation on events:
+     - Player joins/leaves clan
+     - Player power changes (level up, equipment change)
+     - Leaderboard cache expires
+
+CACHING STRATEGY:
+  - Server: Leaderboard calculated every 5-15 minutes
+  - Client: Cache leaderboard for 5 minutes
+  - Partial updates: If power change affects rank, recalculate top 10
+  - Background task: Run leaderboard calculation async
+
+CLIENT-SIDE:
+  - Request LeaderboardRequest
+  - Server returns top 100 entries with rank, clan info, member count
+  - Display with pagination (top 10, 11-50, 51-100)
+  - Show own clan rank highlighted
+  - Auto-refresh every 5-10 minutes
+
+POWER SCORE RECALCULATION TRIGGERS:
+  1. Member joins clan
+  2. Member leaves clan
+  3. Player power increases (level up, equipment)
+  4. Player power decreases (penalty)
+  5. Scheduled: Every 1 hour (catch any missed updates)
+
+5.5 CLAN CHAT SYSTEM
+====================
+
+ARCHITECTURE:
+
+Option 1: REST Polling (Simple, Lower Server Cost)
+  - Client polls for new messages every 2-3 seconds
+  - Messages fetched in batches
+  - Pro: Simple, works behind firewalls
+  - Con: Higher latency, server load
+
+Option 2: WebSocket (Real-time, More Complex)
+  - Maintain persistent connection per player
+  - Server broadcasts to all connected players in clan
+  - Pro: Real-time, smooth UX
+  - Con: More server resources, connection management
+
+RECOMMENDED: Hybrid approach
+  - Primary: REST polling every 3 seconds for robustness
+  - Optional: WebSocket for real-time if available
+  - Fallback to polling if WebSocket unavailable
+
+CLIENT-SIDE MESSAGE FLOW:
+
+SendMessage:
+  1. User types message in chat input
+  2. On Send button click:
+     - Validate message not empty, < 500 chars
+     - Add to local pending message queue
+     - Show message immediately (optimistic update)
+     - Send SendChatMessageRequest to server
+  3. Server responds:
+     - If success: mark as confirmed, assign timestamp
+     - If failure: show error, mark as failed, allow retry
+  4. Retry failed messages:
+     - After 5 seconds, auto-retry
+     - Max 3 retries
+     - If all fail: show "Failed to send" with retry button
+
+ReceiveMessages:
+  1. Poll server every 3 seconds: GetClanChatMessagesRequest
+  2. Server returns: new messages since last poll
+  3. Client adds to local message list
+  4. Display in chat window
+  5. Mark as read (optional, for read receipts)
+  6. Auto-scroll to newest message
+
+MESSAGE HISTORY:
+  - Server stores: Last 1000 messages per clan
+  - Older messages: Available via GetClanChatHistoryRequest
+  - Pagination: Fetch 50 messages at a time
+  - Deleted messages: Soft delete, replaced with "[deleted]" text
+
+SERVER-SIDE CHAT STORAGE:
+
+ChatMessage table:
+  - uid (primary key)
+  - clan_uid (foreign key)
+  - sender_uid
+  - content
+  - timestamp
+  - is_deleted
+  - is_edited (optional)
+  - edit_history[] (optional, for audit)
+
+Database performance:
+  - Index on (clan_uid, timestamp) for efficient queries
+  - Archive old messages (> 30 days) to separate table
+  - Cleanup deleted messages after 7 days
+
+MODERATION:
+
+Admin/Moderator capabilities:
+  1. Delete individual messages
+  2. Mute player (0-24 hours)
+  3. Ban player from clan chat
+  4. Warning system (3 warnings = kick)
+
+Automated moderation (optional):
+  - Spam detection: > 10 messages in 1 minute
+  - Profanity filter: Database of banned words
+  - Link detection: Prevent external links
+  - Rate limiting: Max 1 message per second per player
+
+5.6 SUPPLIES REQUEST SYSTEM
+============================
+
+PURPOSE:
+  - Allow players to ask clan for daily supplies
+  - Encourages player cooperation and engagement
+  - Rewards both requester and responder
+
+REQUIREMENTS:
+  - Once per day per player per clan
+  - Must have responses from other clan members
+  - Can be accepted or declined
+  - Generates reward on acceptance
+
+FEATURE FLOW:
+
+REQUEST CREATION:
+  Client:
+    1. Player clicks "Request Supplies" button
+    2. Check: Has player already requested today?
+       - If yes: Show cooldown timer, disable button
+       - If no: Allow request
+    3. Send CreateSuppliesRequestRequest
+
+  Server:
+    1. Authenticate player
+    2. Verify player in clan
+    3. Check last_supplies_request_time for this clan
+    4. If requested today: Deny (return cooldown end time)
+    5. If allowed: Create SuppliesRequest record
+    6. Broadcast notification to all clan members
+       "PlayerX has requested supplies! Help them out!"
+    7. Return RequestID
+
+  Client:
+    1. Show "Request sent!" message
+    2. Display clan member list with response buttons
+    3. Disable "Request Supplies" button
+    4. Show countdown timer (24 hours)
+
+REQUEST RESPONSES:
+  
+  Other Members:
+    1. See notification in chat or notification area
+    2. Can click "Accept" or "Decline"
+    3. Can see who else has responded
+    4. Submit RespondToSuppliesRequestRequest
+
+  Server:
+    1. Validate responder is clan member (not requester)
+    2. Validate request still active (< 24 hours)
+    3. Validate responder hasn't already responded
+    4. Record response
+    5. Check if enough positive responses (threshold = 1?)
+    6. If enough: Generate and send reward, mark as ACCEPTED
+    7. If declined: Mark as DECLINED after 24h with no acceptances
+    8. Broadcast update to clan
+
+REWARD GENERATION:
+
+Server-side (Anti-cheat):
+  1. Don't generate reward on client
+  2. Server calculates based on:
+     - Requester power
+     - Responder power
+     - Responder's generosity bonus (optional)
+     - Current game economy balance
+  
+  Example: Supplies = (Requester_Power / 100) * (Responder_Power / 100) * 1.5
+  
+  3. Add supplies to player inventory
+  4. Return detailed reward breakdown to client
+  5. Log in database (prevent duplicate rewards)
+
+ABUSE PREVENTION:
+  1. Each player, once per day per clan
+  2. Can't request from own clan if only member
+  3. Can't coordinate farming (detect patterns)
+  4. Server detects: If same 2 players always accept each other
+     - Flag for manual review
+     - Reduce reward multiplier
+  5. Timeout-based: Request expires after 24 hours
+
+EDGE CASES:
+  1. All clan members decline: Request marked DECLINED
+  2. Requester leaves clan before reward: Cancel request
+  3. Responder leaves clan: Response still counts, reward given
+  4. Clan disbands: All requests auto-expire
+
+5.7 PLAYER POWER UPDATES & LEADERBOARD IMPACT
+==============================================
+
+When player power changes (level up, equipment):
+
+Immediate (Client):
+  1. Show "Power increased: +50" notification
+  2. Update player's power display
+
+Server Processing:
+  1. Validate power change (anti-cheat check)
+  2. Update PlayerProfile.power
+  3. Trigger clan power recalculation
+  4. Mark clan for leaderboard refresh
+
+Leaderboard Impact:
+  1. If player in top clan: Recalculate top 10 immediately
+  2. If player in mid-tier clan: Mark for next batch recalc
+  3. Broadcast clan rank changes to affected clans
+  4. Clients receive LeaderboardUpdateEvent with rank changes
+
+================================================================================
+6. BACKEND API DESIGN
+================================================================================
+
+ENDPOINT STRUCTURE:
+
+Base URL: https://api.mechafortress.com/v1/clans
+
+AUTH:
+  - All endpoints require Authorization header with JWT token
+  - JWT contains: player_uid, account_id, issued_time, expiration_time
+  - Token refresh: 24 hour expiration, refresh token mechanism
+
+CLAN ENDPOINTS:
+
+POST /clans
+  Create new clan
+  Request: { name, description, is_public }
+  Response: { uid, owner_uid, created_timestamp }
+  Permission: Any authenticated player
+
+GET /clans/:uid
+  Get clan details
+  Response: { ClanData object }
+  Permission: Any authenticated player
+
+PUT /clans/:uid
+  Update clan settings
+  Request: { name, description, is_public, invite_code? }
+  Response: { updated ClanData }
+  Permission: Owner, Admin
+
+DELETE /clans/:uid
+  Delete clan
+  Response: { success, deleted_at }
+  Permission: Owner only
+
+MEMBERSHIP ENDPOINTS:
+
+POST /clans/:uid/join
+  Join public clan
+  Request: {}
+  Response: { success, clan_uid, role }
+  Permission: Player in clan transfer cooldown
+
+POST /clans/:uid/join-invite
+  Join with invite code
+  Request: { invite_code }
+  Response: { success, clan_uid, role }
+  Permission: Valid invite code
+
+POST /clans/:uid/leave
+  Leave clan
+  Request: {}
+  Response: { success }
+  Permission: Current member
+
+POST /clans/:uid/members/:player_uid/kick
+  Kick player from clan
+  Request: { reason? }
+  Response: { success, removed_player_uid }
+  Permission: Owner (any), Admin (non-admin members only)
+
+PUT /clans/:uid/members/:player_uid/role
+  Change member role
+  Request: { new_role }
+  Response: { success, new_role }
+  Permission: Owner only
+
+LEADERBOARD ENDPOINTS:
+
+GET /clans/leaderboard
+  Get leaderboard (top 100)
+  Query params: ?page=1&limit=50
+  Response: { entries: [ClanLeaderboardEntry], page, total }
+  Permission: Any authenticated player
+
+GET /clans/leaderboard/my-clan
+  Get own clan rank
+  Response: { rank, clan_data, members_power }
+  Permission: Player in a clan
+
+CHAT ENDPOINTS:
+
+GET /clans/:uid/chat/messages
+  Get recent chat messages
+  Query params: ?limit=50&before_timestamp=...
+  Response: { messages: [ChatMessage], has_older: bool }
+  Permission: Clan member
+
+POST /clans/:uid/chat/messages
+  Send chat message
+  Request: { content }
+  Response: { uid, timestamp }
+  Permission: Clan member
+
+DELETE /clans/:uid/chat/messages/:msg_uid
+  Delete message (owner or moderator)
+  Request: {}
+  Response: { success }
+  Permission: Admin, Moderator, or message owner
+
+SUPPLIES REQUEST ENDPOINTS:
+
+POST /clans/:uid/supplies-request
+  Create supplies request
+  Request: {}
+  Response: { request_uid, expires_at }
+  Permission: Clan member, once per day
+
+GET /clans/:uid/supplies-request/:request_uid
+  Get request status
+  Response: { SuppliesRequest object }
+  Permission: Clan member
+
+POST /clans/:uid/supplies-request/:request_uid/respond
+  Accept or decline request
+  Request: { accepted: bool }
+  Response: { success, reward_earned? }
+  Permission: Clan member (not requester)
+
+ERROR RESPONSES:
+
+All endpoints return consistent error format:
+{
+  "error": "error_code",
+  "message": "Human readable message",
+  "details": { extra info },
+  "timestamp": "2026-06-11T10:30:00Z"
+}
+
+Common error codes:
+  - UNAUTHORIZED: No valid token
+  - FORBIDDEN: Token valid but no permission
+  - NOT_FOUND: Resource doesn't exist
+  - VALIDATION_ERROR: Input validation failed
+  - COOLDOWN_ACTIVE: Action on cooldown
+  - CLAN_FULL: Clan at max capacity
+  - INVALID_INVITE_CODE: Code expired or invalid
+  - ALREADY_IN_CLAN: Player already member of a clan
+  - INSUFFICIENT_PERMISSIONS: Player role lacks permission
+
+================================================================================
+7. CLIENT-SERVER COMMUNICATION PATTERNS
+================================================================================
+
+7.1 REQUEST FLOW PATTERN
+=========================
+
+1. USER ACTION
+   └─> Client validates input locally
+
+2. OPTIMISTIC UPDATE
+   └─> Client immediately updates UI
+   └─> Queues request in RequestQueue
+
+3. SERVER REQUEST
+   └─> Client sends HTTP POST to backend
+   └─> Includes retry count, idempotency token
+
+4. SERVER PROCESSING
+   └─> Validate authentication (JWT)
+   └─> Check authorization (permissions)
+   └─> Validate input (again, don't trust client)
+   └─> Check cooldowns, limits, constraints
+   └─> Atomic database transaction
+   └─> Return success or detailed error
+
+5. CLIENT RESPONSE HANDLING
+   a) If success:
+      └─> Confirm optimistic update
+      └─> Broadcast BroadcastEvent to UI
+   
+   b) If error (validation):
+      └─> Revert optimistic update
+      └─> Show error message to player
+      └─> Highlight problematic field
+   
+   c) If error (server):
+      └─> Revert optimistic update
+      └─> Show generic error message
+      └─> Log incident for debugging
+   
+   d) If network failure:
+      └─> Keep optimistic update
+      └─> Retry after 5 seconds
+      └─> Show connection status indicator
+      └─> Max 3 retries, then fail
+
+7.2 IDEMPOTENCY & RETRY SAFETY
+===============================
+
+Ensure safe retries:
+  1. All POST requests include idempotency_token (UUID)
+  2. Server checks: Has token been processed before?
+     - If yes: Return cached response (don't repeat action)
+     - If no: Process normally, cache response
+  3. Idempotency cache expires after 24 hours
+  4. Prevents: Double-charging, duplicate messages, etc.
+
+Example: Player double-clicks "Send Supplies"
+  - First click: processed, marked with token ABC
+  - Second click (before response): queued with same token ABC
+  - Server receives both: processes first, returns cached result for second
+
+7.3 CONFLICT RESOLUTION
+=======================
+
+Scenario: Clan owner changes clan name simultaneously
+  Player A: Sends name change to "Elite Guild"
+  Player B: Sends name change to "Legends Rising"
+  
+  Server processing:
+    1. First request succeeds: clan_name = "Elite Guild", version = 2
+    2. Second request fails: version mismatch detected
+    3. Server returns: { error: "VERSION_CONFLICT", current_version: 2, latest_data: {...} }
+  
+  Client B:
+    1. Receives conflict error
+    2. Shows: "Clan name was changed by another player. New name: 'Elite Guild'"
+    3. Refetch clan data
+    4. Allow user to retry change
+
+7.4 EVENTUAL CONSISTENCY
+=========================
+
+Some operations eventual consistent:
+  - Leaderboard rankings: Updated every 5-15 minutes
+  - Chat message read receipts: Updated eventually
+  - Player statistics: Updated after daily refresh
+
+Pattern:
+  1. Client makes request, gets immediate confirmation
+  2. Server queues background job for eventual update
+  3. Client polls or listens for updates
+  4. UI shows "calculating" spinner until confirmed
+
+Example: Player levels up (power increases)
+  1. Client sends PowerChangeRequest
+  2. Server: Updates player power immediately, queues leaderboard update
+  3. Response: { success, new_power, leaderboard_will_update_soon: true }
+  4. Client: Shows updated power, shows "updating leaderboard..." spinner
+  5. Within 1-2 minutes: Leaderboard broadcast event, update clan rank
+
+================================================================================
+8. SECURITY & ANTI-CHEAT MEASURES
+================================================================================
+
+8.1 AUTHENTICATION & AUTHORIZATION
+===================================
+
+Player Authentication:
+  1. Login with credentials (username/password)
+  2. Server issues JWT token (24h expiration)
+  3. Token includes: uid, account_id, issued_at, expires_at
+  4. Refresh token mechanism for long sessions
+  5. Each request must include valid JWT
+
+Authorization:
+  1. On every action, server verifies:
+     - JWT token valid & not expired
+     - Player UID matches authenticated player
+     - Player has required role for action
+  2. Example: Kick player request
+     - Verify requester is Owner or Admin
+     - Verify target player in same clan
+     - Verify target player not self or higher role
+
+8.2 ANTI-FRAUD MEASURES
+=======================
+
+Clan Creation Abuse:
+  - Rate limit: Max 1 clan creation per account per week
+  - After creation, immediate lock for 24 hours
+  - Monitor: Patterns of users creating/disbanding rapidly
+
+Supplies Exploit:
+  - Server-side generation only (never trust client)
+  - Track response pairs: If same 2 players always accept each other
+    * Flag for manual review
+    * Reduce reward coefficient to 0.5x
+  - Timeout check: Request exists in system before reward generated
+  - Anti-duplicate: Request UID must exist, not already claimed
+
+Power Score Cheating:
+  - Power value set server-side only
+  - Never trust client power value
+  - On suspicious change: Recalculate from player data
+  - If mismatch: Rollback to last known valid state, log incident
+
+Money/Resource Cheating:
+  - All resource rewards server-side
+  - Never accept inventory state from client
+  - Verify against legitimate sources:
+    * Supplies requests (only source in this design)
+    * Quests/events (future)
+  - Detect patterns: Unrealistic resource gains
+
+8.3 DDOS & RATE LIMITING
+=========================
+
+Per-account rate limits:
+  - POST requests: Max 100 per minute
+  - GET requests: Max 500 per minute
+  - Specific limits per endpoint:
+    * SendChatMessage: Max 10 per minute (1 per 6 sec)
+    * CreateSuppliesRequest: Max 1 per 24 hours
+    * JoinClan: Max 1 per week
+
+Per-IP rate limits:
+  - Max 1000 requests per minute
+  - Ban IP after 10 consecutive failures (403)
+
+Implemented via:
+  - Redis cache (fast lookup)
+  - Token bucket algorithm
+  - Return 429 (Too Many Requests) on limit
+
+8.4 DATA VALIDATION
+===================
+
+Client-side (user-facing):
+  - Provide immediate feedback
+  - Prevent obviously invalid submissions
+  - Improve user experience
+
+Server-side (security-critical):
+  - Validate EVERY input
+  - Never trust client validation
+  - Whitelist allowed values, reject anything else
+
+Validation examples:
+  - Clan name: Length 1-50, alphanumeric + spaces, no special chars
+  - Chat message: Length 1-500, UTF-8, no script tags
+  - Role changes: From enum of valid roles, not user input
+  - Timestamps: Check within reasonable time (not year 2100)
+
+8.5 AUDIT LOGGING
+=================
+
+Log all sensitive actions:
+  - Clan creation/deletion
+  - Member role changes
+  - Clan ownership transfer
+  - Admin kicks
+  - Supplies request acceptance/denial
+  - Leaderboard position changes
+
+Log format:
+{
+  "action": "player_kicked_from_clan",
+  "actor_uid": "...",
+  "target_uid": "...",
+  "clan_uid": "...",
+  "timestamp": "2026-06-11T10:30:00Z",
+  "ip_address": "192.168.1.1",
+  "result": "success",
+  "details": { reason: "spam_in_chat" }
+}
+
+Retention: 90 days minimum, searchable by action/player/clan
+
+================================================================================
+9. CLIENT-SIDE IMPLEMENTATION ARCHITECTURE
+================================================================================
+
+9.1 CURRENT STRUCTURE
+=====================
+
+Existing Classes:
+  - Clan.cs: Data model only (good)
+  - ClanManager.cs: Manager singleton, list of clans
+  - Player.cs: Data model + some business logic
+  - PlayerManager.cs: Manager singleton, list of players
+  - GameManager.cs: Initialization, test data generation
+  - Various UI classes: Display and interaction
+
+9.2 RECOMMENDED STRUCTURE EXPANSION
+===================================
+
+Add Services Layer (between Managers and Network):
+
+ClanService.cs (Singleton)
+  ├─ ClanRepository: Local CRUD
+  │  ├─ clans: List<Clan>
+  │  ├─ GetClan(uid): Clan
+  │  ├─ UpdateClanLocal(clan): void
+  │  ├─ DeleteClanLocal(uid): void
+  │  └─ ClearAll(): void
+  │
+  ├─ ClanNetworkManager: API communication
+  │  ├─ CreateClanRequest(data)
+  │  ├─ UpdateClanRequest(uid, data)
+  │  ├─ DeleteClanRequest(uid)
+  │  ├─ JoinClanRequest(uid)
+  │  ├─ LeaveClanRequest(uid)
+  │  └─ KickPlayerRequest(clan_uid, player_uid)
+  │
+  └─ ClanCacheManager: Cache invalidation
+     ├─ InvalidateClan(uid): void
+     ├─ InvalidateLeaderboard(): void
+     ├─ GetCachedClan(uid): Clan?
+     └─ IsCacheValid(uid): bool
+
+PlayerService.cs (Singleton)
+  ├─ PlayerRepository: Local CRUD
+  ├─ PlayerNetworkManager: API communication
+  │  ├─ GetPlayerProfile(uid)
+  │  ├─ UpdatePowerRequest(new_power)
+  │  └─ GetPlayerTransferCooldown()
+  │
+  └─ TransferCooldownManager: Locally track cooldown
+     ├─ HasTransfersRemaining(): bool
+     ├─ TimeUntilNextTransfer(): float
+     └─ RecordTransfer(clan_uid): void
+
+ChatService.cs (Singleton)
+  ├─ ChatRepository: Local message cache
+  │  ├─ messages: List<ChatMessage>
+  │  ├─ AddMessage(msg): void
+  │  ├─ GetMessages(clan_uid): List<ChatMessage>
+  │  ├─ DeleteMessage(msg_uid): void
+  │  └─ ClearOldMessages(): void
+  │
+  ├─ ChatNetworkManager: API communication
+  │  ├─ SendChatMessageRequest(clan_uid, content)
+  │  ├─ GetChatMessagesRequest(clan_uid, limit)
+  │  ├─ DeleteChatMessageRequest(msg_uid)
+  │  └─ PollForNewMessages(): async
+  │
+  └─ ChatPollingManager: Polling loop
+     ├─ StartPolling(interval)
+     ├─ StopPolling()
+     └─ OnNewMessagesReceived: Event
+
+LeaderboardService.cs (Singleton)
+  ├─ LeaderboardRepository: Local cache
+  ├─ LeaderboardNetworkManager: API communication
+  │  ├─ GetLeaderboardRequest(page)
+  │  ├─ GetMyClanRankRequest()
+  │  └─ OnLeaderboardUpdateBroadcast: Event
+  │
+  └─ LeaderboardCacheManager: Cache with TTL
+     ├─ IsLeaderboardCached(max_age): bool
+     ├─ InvalidateLeaderboard(): void
+     └─ ScheduleRefresh(delay): void
+
+SuppliesService.cs (Singleton)
+  ├─ SuppliesRepository: Local cache
+  ├─ SuppliesNetworkManager: API communication
+  │  ├─ CreateSuppliesRequestRequest(clan_uid)
+  │  ├─ GetSuppliesRequestRequest(request_uid)
+  │  ├─ RespondToSuppliesRequest(request_uid, accepted)
+  │  └─ GetLastRequestTime(clan_uid)
+  │
+  └─ SuppliesCooldownManager: Track per-clan daily limit
+     ├─ CanRequestSupplies(clan_uid): bool
+     ├─ TimeUntilNextRequest(clan_uid): float
+     └─ RecordSuppliesRequest(clan_uid): void
+
+NetworkManager.cs (Singleton, Core)
+  ├─ Configuration
+  │  ├─ api_base_url: string
+  │  ├─ api_key: string
+  │  ├─ jwt_token: string
+  │  └─ jwt_expiration: long
+  │
+  ├─ Request Queue
+  │  ├─ pending_requests: Queue<INetworkRequest>
+  │  ├─ QueueRequest(request): void
+  │  └─ ProcessQueue(): async
+  │
+  ├─ Core Methods
+  │  ├─ SendRequest(endpoint, method, data)
+  │  ├─ HandleResponse(response)
+  │  ├─ HandleError(error)
+  │  └─ RefreshToken(): async
+  │
+  └─ Events
+     ├─ OnNetworkError: Event
+     ├─ OnNetworkSuccess: Event
+     └─ OnConnectionStatusChanged: Event
+
+9.3 REQUEST QUEUING SYSTEM
+===========================
+
+Interface INetworkRequest:
+  - GetEndpoint(): string
+  - GetMethod(): HTTPMethod (GET, POST, PUT, DELETE)
+  - GetData(): JSONObject
+  - GetIdempotencyToken(): string
+  - GetRetryCount(): int
+  - OnSuccess(response): void
+  - OnFailure(error): void
+
+RequestQueue system:
+  1. Player clicks "Send" → Creates SendMessageRequest
+  2. Request added to queue
+  3. Optimistic UI update immediately
+  4. NetworkManager processes queue
+  5. If network available: Send immediately
+  6. If network unavailable: Keep in queue, retry every 5 sec
+  7. After 3 failed attempts: Mark failed, notify user
+  8. User can manually retry
+
+Benefits:
+  - Works offline (data held locally)
+  - Automatic retry on network issues
+  - Clean separation of UI from network
+
+9.4 CACHING STRATEGY
+====================
+
+Cache Levels:
+
+Level 1: Runtime Cache (Fast, in-memory)
+  - Current player profile
+  - Current clan data
+  - Last 50 chat messages
+  - TTL: 5 minutes or manual invalidation
+
+Level 2: PlayerPrefs Cache (Persistent)
+  - Clan list (summary view)
+  - Leaderboard top 10
+  - TTL: 15 minutes
+
+Level 3: Refresh on Demand
+  - Detailed player stats
+  - Full chat history
+  - Leaderboard all pages
+  - Fetched when user navigates to view
+
+Cache invalidation triggers:
+  1. Automatic:
+     - Time-based expiration (TTL)
+     - Background refresh loop
+  2. Event-based:
+     - Action success (join clan → invalidate leaderboard)
+     - Network broadcast (leaderboard update → invalidate cache)
+  3. Manual:
+     - User refresh button
+     - On app resume
+
+9.5 OFFLINE SUPPORT
+===================
+
+Limited offline capabilities:
+  - Read cached data (clans, chat history, leaderboard)
+  - Queue actions (join, send message, supplies request)
+  - Show "offline mode" indicator
+
+When network returns:
+  1. Process queued requests
+  2. Refresh all data from server
+  3. Resolve any conflicts
+
+Not supported offline:
+  - Real-time chat polling
+  - Leaderboard ranking
+  - Live player activity
+
+================================================================================
+10. UI/UX DESIGN
+================================================================================
+
+10.1 MAIN SCREENS
+=================
+
+1. MAIN CLAN SCREEN
+   ┌─────────────────────────────────┐
+   │ My Clan: [Clan Name]            │ [Leave] [Settings]
+   ├─────────────────────────────────┤
+   │ Power: 5000 | Rank: #12        │
+   │ Members: 5/100                  │
+   ├─────────────────────────────────┤
+   │ Chat (recent messages)          │
+   │ ├─ Player1: "Nice play!"       │
+   │ ├─ Player2: "GG!"              │
+   │ └─ [See all chat]              │
+   ├─────────────────────────────────┤
+   │ [Send Supplies Request]         │
+   ├─────────────────────────────────┤
+   │ Members:                        │
+   │ ├─ Owner: PlayerA (900 power)   │
+   │ ├─ Admin: PlayerB (850 power)   │
+   │ ├─ Member: PlayerC (600 power)  │
+   │ └─ [View All]                  │
+   └─────────────────────────────────┘
+
+2. CLAN LIST SCREEN
+   ┌─────────────────────────────────┐
+   │ [Create Clan]  [Leaderboard]   │
+   ├─────────────────────────────────┤
+   │ Search: [________]              │
+   │ Filter: [All] [Public] [Mine]   │
+   ├─────────────────────────────────┤
+   │ Clan List:                      │
+   │ 1. Elite Guild        5000 | [Join]
+   │    5/100 members | Public
+   │
+   │ 2. Dragon Slayers     4800 | [Join]
+   │    8/100 members | Public
+   │
+   │ 3. Legend Seekers     4500 | [Invite Code]
+   │    3/100 members | Invite-only
+   │
+   └─────────────────────────────────┘
+
+3. LEADERBOARD SCREEN
+   ┌─────────────────────────────────┐
+   │ Clan Leaderboard               │
+   ├─────────────────────────────────┤
+   │ Rank | Clan Name | Power | Members
+   │  1   | Elite Guild    | 5000 | 5
+   │  2   | Dragon Slayers | 4800 | 8
+   │  3   | Legend Seekers | 4500 | 3
+   │  ⭐ 12 | My Clan       | 3200 | 6
+   │ 13   | Sky Pirates    | 3100 | 7
+   │
+   │ [Previous] Page 1 of 20 [Next]
+   └─────────────────────────────────┘
+
+4. CHAT SCREEN (Detail)
+   ┌─────────────────────────────────┐
+   │ Elite Guild - Chat             │
+   ├─────────────────────────────────┤
+   │ Player1 10:20: "Nice play!"    │
+   │ Player2 10:21: "Thanks!"       │
+   │ You    10:22: "Anyone want to   │
+   │ Player3 10:23: "Sure!"         │
+   │ [Load earlier messages]        │
+   ├─────────────────────────────────┤
+   │ Message: [_______________]      │
+   │ [Send]                          │
+   └─────────────────────────────────┘
+
+5. SUPPLIES REQUEST SCREEN
+   ┌─────────────────────────────────┐
+   │ Supplies Requests              │
+   ├─────────────────────────────────┤
+   │ Your requests:                  │
+   │
+   │ PlayerX requested supplies (2h ago)
+   │ - You: [Accept] [Decline]
+   │ - PlayerA: Accepted ✓
+   │ - PlayerB: No response yet
+   │ - PlayerC: Declined ✗
+   │
+   │ Status: ACCEPTED (Reward: 250)
+   │
+   ├─────────────────────────────────┤
+   │ Requests from others:          │
+   │
+   │ PlayerY requested supplies
+   │ - You: [Accept] [Decline]
+   │ - 2 others accepted
+   │
+   │ [Send Your Request] (Available)
+   └─────────────────────────────────┘
+
+10.2 DIALOGS & POPUPS
+====================
+
+CREATE CLAN DIALOG:
+  Clan Name: [____________________] (max 50 chars)
+  Description: [__________________]
+               [__________________]  (max 200 chars)
+  
+  Type: ○ Public   ○ Invite-only
+  
+  [Cancel] [Create]
+
+JOIN CLAN DIALOG:
+  Are you sure you want to join "Elite Guild"?
+  - Transfers remaining this week: 1
+  - Your power will contribute to clan power
+  - Can leave after 10 seconds
+  
+  [Cancel] [Confirm Join]
+
+INVITE CODE DIALOG:
+  Enter Invite Code:
+  [________________]
+  
+  [Cancel] [Join with Code]
+
+SUPPLIES REQUEST CONFIRMATION:
+  You can request supplies once per day per clan.
+  Last request: 22 hours ago
+  Next request available: 2 hours from now
+  
+  [Cancel] [Send Request]
+
+10.3 NOTIFICATIONS & INDICATORS
+===============================
+
+UI Elements:
+  - Badge: Clan member count bubble (e.g., "5/100")
+  - Badge: Clan rank (e.g., "#12")
+  - Badge: Pending supplies requests (e.g., "3" in red circle)
+  - Toast: "You joined Elite Guild!"
+  - Toast: "You were kicked from Dragon Slayers"
+  - Cooldown timer: "Next transfer in 5 days 3 hours"
+  - Cooldown timer: "Next supplies request in 18 hours"
+
+Status Indicators:
+  - Online/Offline indicator next to player names
+  - Last activity timestamp
+  - Recent activity highlight
+
+================================================================================
+11. EDGE CASES & RISK MITIGATION
+================================================================================
+
+11.1 NETWORK FAILURES
+====================
+
+Scenario: Player sends message, network drops
+
+Current state:
+  - Message queued locally
+  - Optimistic UI update (message shown)
+  - Server request fails
+
+Recovery:
+  1. Show "Failed to send" with retry button
+  2. Auto-retry every 5 seconds (background)
+  3. After 3 manual retries: Show detailed error
+  4. Option: Delete message or keep trying
+  5. On network restore: Auto-process queue
+
+Scenario: Player in clan, connection lost, rejoins clan while offline
+
+Result:
+  - Local: Player appears in clan
+  - Server: Player still in clan
+  - Sync: On reconnect, fetch latest clan data, resolve conflicts
+
+11.2 TIMING & RACE CONDITIONS
+=============================
+
+Scenario: Player transfers between 2 clans simultaneously
+
+Request A: Transfer to ClanX
+Request B: Transfer to ClanY
+
+Server processing (both received almost simultaneously):
+  1. Process Request A first:
+     - Remove player from current clan
+     - Add player to ClanX
+     - Response: Success
+     - Update leaderboard
+  
+  2. Process Request B:
+     - Check player's clan status
+     - Player now in ClanX, not original clan
+     - Validation: Can't transfer, already transferred
+     - Response: Error "ALREADY_IN_DIFFERENT_CLAN"
+  
+  3. Client B:
+     - Sees error
+     - Refetches player profile
+     - UI updates to show ClanX membership
+
+Idempotency prevents issues:
+  - Each request has unique token
+  - Server responds with same result to retries
+
+11.3 OWNERSHIP EDGE CASES
+=========================
+
+Scenario 1: Last member leaves clan
+  - Owner leaves, no other members
+  - Action: Clan auto-deletes
+  - Audit: Logged as "clan_disbanded"
+  - Leaderboard: Clan removed
+
+Scenario 2: Owner tries to leave but is last member
+  - Client check: "Clan will disband. Continue?"
+  - If confirm: Delete clan, log as owner_initiated_disband
+  - If cancel: User can transfer ownership first
+
+Scenario 3: Owner leaves while transferring ownership
+  - On leave: Auto-transfer to next admin
+  - If no admin: Transfer to highest-power member
+  - If single member: Auto-delete
+
+Scenario 4: Simultaneous ownership transfer requests
+  - Both players try to become owner
+  - Server: First wins, other gets error
+  - Conflict resolution: Show error, fetch current owner
+
+11.4 SUPPLIES REQUEST EDGE CASES
+=================================
+
+Scenario 1: Player requests supplies, clan fully declines
+
+Expected flow:
+  1. Request created
+  2. After 24 hours with no acceptances: Mark DECLINED
+  3. No reward generated
+  4. Player can request again tomorrow
+  5. Client shows: "Request declined" and suggests "Try tomorrow"
+
+Scenario 2: Requester leaves clan before reward processed
+
+Check on reward generation:
+  1. Verify player still in clan
+  2. If left: Cancel request, refund supplies to responders? (Policy decision)
+  3. If still in: Generate reward normally
+
+Scenario 3: Clan is deleted while supplies request pending
+
+On clan deletion:
+  1. All pending supplies requests marked as EXPIRED
+  2. No rewards generated
+  3. Players notified: "Request expired (clan disbanded)"
+
+Scenario 4: Player tries to request from a clan they're not in
+
+Server validation:
+  1. Verify player_uid in clan members list
+  2. If not: Return error "NOT_CLAN_MEMBER"
+  3. Client: Refetch clan data, show error
+
+11.5 LEADERBOARD EDGE CASES
+===========================
+
+Scenario 1: Clan power increases/decreases rapidly
+
+Problem: Leaderboard might show stale ranks
+
+Solution:
+  - Calculate top 10 immediately on power change
+  - Cache updates for 5 minutes
+  - Mid-tier changes (11+) batch every 15 minutes
+  - Clients receive: "Leaderboard may have changed" notification
+
+Scenario 2: Large power swing due to multiple player changes
+
+Example: All 5 top players leave clan (before new members join)
+
+Actions:
+  1. Recalculate clan power (now much lower)
+  2. Clan drops from rank 5 to rank 200
+  3. Broadcast to clan: New rank notification
+  4. Update leaderboard cache
+
+Scenario 3: Two clans have identical power scores
+
+Tie-breaking:
+  1. Sort by member count (more members = higher rank)
+  2. If still tied: Sort by most recent power update (newer = higher)
+  3. If still tied: Sort by clan UID alphabetically (deterministic)
+
+11.6 CHAT MODERATION EDGE CASES
+================================
+
+Scenario 1: Moderator tries to delete admin's message
+
+Permission check:
+  1. Moderator can delete member messages
+  2. Moderator cannot delete admin/owner messages
+  3. Server validation: Check role hierarchy
+  4. Response: Error "INSUFFICIENT_PERMISSIONS"
+
+Scenario 2: Message deleted, but client still shows it
+
+Solution:
+  1. Client receives DeleteMessageEvent
+  2. Find message in local cache by UID
+  3. Replace with "[deleted]" placeholder or hide
+  4. Sync on next poll: Verify deletion
+
+Scenario 3: Spam of 100 messages in 1 second
+
+Rate limiting:
+  1. Per-player limit: Max 1 message per 2 seconds
+  2. Server enforces: 429 Too Many Requests after limit
+  3. Client shows: "Sending too fast, wait X seconds"
+  4. Automatic: Implements cooldown on send button
+
+11.7 AUTHENTICATION & SESSION EDGE CASES
+==========================================
+
+Scenario 1: JWT token expires mid-session
+
+Implementation:
+  1. Client receives 401 Unauthorized
+  2. Auto-refresh token using refresh_token
+  3. Retry original request
+  4. If refresh fails: Redirect to login
+  5. User shouldn't see any disruption
+
+Scenario 2: Player logged in on 2 devices simultaneously
+
+Possible issues:
+  - State might desync
+  - Both devices send conflicting requests
+  - Second device might get permission denied
+
+Solution (optional, depends on game requirements):
+  1. Allow multiple sessions (simpler)
+  2. Sync state across devices (more complex)
+  3. Kill first session on second login (strict)
+
+For this design: Allow multiple sessions, rely on idempotency
+
+Scenario 3: Player account hacked, fraudulent requests
+
+Detection:
+  1. Unusual activity pattern (many clan joins in 5 minutes)
+  2. Supplies requests from unusual locations/IPs
+  3. Rapid power changes
+
+Response:
+  1. Temporary account lock
+  2. Manual review by admin
+  3. Rollback fraudulent transactions
+  4. Notify player
+
+================================================================================
+12. PERFORMANCE & SCALABILITY CONSIDERATIONS
+================================================================================
+
+12.1 DATABASE OPTIMIZATION
+===========================
+
+Tables & Indexes:
+
+PlayerProfile table:
+  - Primary key: uid
+  - Indexes:
+    * account_id (foreign key to auth system)
+    * clan_uid (foreign key to clan)
+    * created_timestamp (for cleanup queries)
+    * is_banned (for filtering)
+
+ClanData table:
+  - Primary key: uid
+  - Indexes:
+    * is_public (for listing public clans)
+    * owner_uid (for user's clans)
+    * created_timestamp
+    * total_power (for leaderboard)
+
+ClanMember table:
+  - Primary key: (clan_uid, player_uid) - composite
+  - Indexes:
+    * clan_uid (list members by clan)
+    * player_uid (list clans by player)
+    * joined_timestamp
+    * role (filter by role)
+
+ChatMessage table:
+  - Primary key: uid
+  - Indexes:
+    * (clan_uid, timestamp) - for efficient range queries
+    * sender_uid (find player's messages)
+    * is_deleted (for hard deletes)
+  - Partitioning: By clan_uid for sharding
+  - Archiving: Move to archive after 30 days
+
+SuppliesRequest table:
+  - Primary key: uid
+  - Indexes:
+    * clan_uid
+    * requester_uid
+    * status (for filtering)
+    * request_timestamp
+
+LeaderboardCache table:
+  - Primary key: clan_uid
+  - Single record per clan with denormalized ranking data
+  - Refresh every 15 minutes
+
+12.2 CACHING STRATEGY (SERVER-SIDE)
+====================================
+
+Redis caching:
+  - Player profiles: Cache 1 hour
+  - Clan data: Cache 5 minutes (invalidate on change)
+  - Leaderboard: Cache 15 minutes
+  - Invite codes: Cache while valid
+  - Chat message list: Cache 2 minutes
+
+Cache invalidation:
+  - Event-based: On player action, invalidate related cache
+  - Time-based: Automatic TTL expiration
+  - Pattern: Use cache keys like "clan:{uid}:profile"
+
+12.3 QUERY OPTIMIZATION
+=======================
+
+Common queries to optimize:
+
+Get leaderboard (top 100):
+  SELECT uid, clan_name, total_power, member_count
+  FROM clans
+  WHERE is_active = true
+  ORDER BY total_power DESC
+  LIMIT 100
+  
+  Optimization: Denormalized cache table, refreshed via background job
+
+Get clan members:
+  SELECT * FROM clan_members
+  WHERE clan_uid = ? AND role != 'BANNED'
+  ORDER BY joined_timestamp DESC
+  
+  Optimization: Index on (clan_uid, role), pre-calculated member count
+
+Get recent chat:
+  SELECT * FROM chat_messages
+  WHERE clan_uid = ? AND is_deleted = false
+  ORDER BY timestamp DESC
+  LIMIT 50
+  
+  Optimization: Index on (clan_uid, timestamp), partition by clan
+
+12.4 SCALING ARCHITECTURE
+==========================
+
+Stage 1 (0-50K players):
+  - Single server
+  - Shared database
+  - In-memory caching (Redis)
+  - Acceptable latency: < 200ms
+
+Stage 2 (50K-500K players):
+  - Load balancer
+  - Multiple API servers (horizontal scale)
+  - Read replicas for database
+  - Clan data partitioned by ID
+  - Chat messages partitioned by clan
+
+Stage 3 (500K-5M players):
+  - Geographical load balancers (multi-region)
+  - API servers in multiple regions
+  - Database sharding by player ID (for reads)
+  - Dedicated cache cluster
+  - Message queue for async jobs (leaderboard updates)
+  - Real-time features (WebSocket) on separate servers
+
+12.5 BACKGROUND JOBS
+====================
+
+Async processing via job queue:
+
+Leaderboard Update (every 15 minutes):
+  - Calculate all clan power scores
+  - Update leaderboard rankings
+  - Identify rank changes
+  - Broadcast updates to affected clients
+
+Supplies Request Cleanup (hourly):
+  - Find expired requests (> 24 hours, status = PENDING)
+  - Mark as EXPIRED
+  - Cleanup SuppliesResponse records
+
+Chat Archive (daily at 2 AM UTC):
+  - Move messages > 30 days to archive table
+  - Reduce active database size
+  - Keep searchable but slower
+
+Player Statistics Update (every 6 hours):
+  - Aggregate player contribution to clan power
+  - Calculate top contributors per clan
+  - Update clan leader insights
+
+Account Cleanup (weekly):
+  - Delete inactive accounts (> 1 year)
+  - Cleanup orphaned clan data
+  - Cleanup expired invite codes
+
+================================================================================
+13. RECOMMENDED IMPLEMENTATION ROADMAP
+================================================================================
+
+Phase 1: Foundation (Weeks 1-2)
+  ✓ Extend Player model:
+    - Add role system
+    - Add transfer cooldown (weekly)
+  ✓ Extend Clan model:
+    - Change max members to 100
+    - Add invite code support
+    - Add private/public flag
+  ✓ Implement permission checking system
+  ✓ Create API client wrapper (NetworkManager)
+  ✓ Implement request queuing
+
+Phase 2: Clan Management (Weeks 3-4)
+  ✓ Implement role management UI
+  ✓ Implement invite code generation UI
+  ✓ Implement kick/remove members
+  ✓ Implement clan transfer with weekly cooldown
+  ✓ Add cooldown displays to UI
+
+Phase 3: Chat System (Weeks 5-6)
+  ✓ Implement chat message model
+  ✓ Implement chat polling/sending
+  ✓ Create chat UI
+  ✓ Implement message deletion
+  ✓ Add moderation permissions
+
+Phase 4: Leaderboard & Power Score (Weeks 7-8)
+  ✓ Implement weighted power calculation
+  ✓ Create leaderboard UI
+  ✓ Implement leaderboard caching
+  ✓ Add clan rank display
+  ✓ Implement power score updates on member changes
+
+Phase 5: Supplies System (Weeks 9-10)
+  ✓ Implement supplies request model
+  ✓ Implement daily cooldown per clan
+  ✓ Create supplies UI
+  ✓ Implement reward generation
+  ✓ Add supplies notifications
+
+Phase 6: Backend Integration (Weeks 11-12)
+  ✓ Implement authentication system
+  ✓ Connect to REST API endpoints
+  ✓ Implement data persistence
+  ✓ Add anti-cheat validation
+  ✓ Comprehensive testing
+
+Phase 7: Polish & Optimization (Weeks 13-14)
+  ✓ UI/UX refinement
+  ✓ Performance optimization
+  ✓ Error handling & recovery
+  ✓ Beta testing
+  ✓ Balance adjustments
+
+Phase 8: Soft Launch (Week 15)
+  ✓ Deploy to staging
+  ✓ Monitor for issues
+  ✓ Gather feedback
+  ✓ Fix critical issues
+  ✓ Deploy to production
+
+================================================================================
+14. FUTURE EXTENSIONS
+================================================================================
+
+Potential features for expansion:
+
+Clan Wars:
+  - 1v1 clan battles
+  - Seasonal rankings
+  - Reward pool for winning clans
+  - Would require: Match making, tournament structure
+
+Clan Quests:
+  - Collaborative missions
+  - Shared objectives
+  - Clan-wide rewards
+  - Would require: Quest system, shared progress tracking
+
+Clan Events:
+  - Limited-time activities
+  - Special rewards
+  - Drive engagement
+  - Would require: Event scheduling, participation tracking
+
+Clan Leveling:
+  - Clan level increases as members play
+  - Unlock new features at higher levels
+  - Would require: Experience tracking, progression system
+
+Clan Perks:
+  - Resource bonuses for clan members
+  - Passive income for clan
+  - Would require: Perk tree UI, bonus calculation
+
+Clan Territories:
+  - Clans control map regions
+  - Generate resources
+  - Clan wars for territory control
+  - Would require: Map system, territory mechanics
+
+Guild Leaders Board:
+  - Ranking of clan owners
+  - Prestige system
+  - Cosmetic rewards
+  - Would require: Leader ranking, cosmetic system
+
+================================================================================
+15. DEPLOYMENT & OPERATIONS
+================================================================================
+
+15.1 DEPLOYMENT CHECKLIST
+==========================
+
+Pre-deployment:
+  ☐ Database migrations tested
+  ☐ API endpoints tested (unit + integration)
+  ☐ Load testing completed (target: 10K concurrent connections)
+  ☐ Security audit completed
+  ☐ Backup strategy verified
+  ☐ Rollback plan documented
+  ☐ Monitoring alerts configured
+  ☐ Team trained on runbooks
+
+Deployment steps:
+  1. Backup production database
+  2. Deploy new code to staging
+  3. Run smoke tests
+  4. Migrate data (if schema changed)
+  5. Toggle feature flag to 10% of users
+  6. Monitor for 30 minutes
+  7. Roll to 100% if stable
+  8. Document release notes
+
+15.2 MONITORING & ALERTING
+===========================
+
+Key metrics:
+  - API response time (target: < 200ms p99)
+  - Error rate (target: < 0.1%)
+  - Database query time (target: < 100ms p95)
+  - Cache hit rate (target: > 80%)
+  - Active players in clan system
+  - Clan chat message throughput
+
+Alerts:
+  - Response time > 500ms
+  - Error rate > 1%
+  - Database connection pool exhausted
+  - Redis memory > 90%
+  - API server CPU > 80%
+  - Queue depth > 10K items
+
+15.3 SUPPORT & TROUBLESHOOTING
+==============================
+
+Common issues:
+
+"I can't join a clan"
+  - Check: Is player already in a clan?
+  - Check: Is player transfer cooldown active?
+  - Check: Is clan full (100 members)?
+  - Check: Is player banned from system?
+  - Check: Is clan deleted?
+  - Solution: Show specific error message to player
+
+"Clan chat messages aren't showing up"
+  - Check: Chat polling active?
+  - Check: Network connection?
+  - Check: Messages deleted by moderator?
+  - Check: Chat history cache cleared?
+  - Solution: Force refresh chat, clear cache
+
+"Leaderboard rank incorrect"
+  - Check: Power score cache stale?
+  - Check: Member changes not yet calculated?
+  - Solution: Wait 15 minutes or force recalculation
+
+================================================================================
+16. SUMMARY & NEXT STEPS
+================================================================================
+
+16.1 ARCHITECTURE HIGHLIGHTS
+=============================
+
+✓ Scalable three-tier architecture (Client - API - Database)
+✓ Clear separation of concerns (UI, Services, Network, Data)
+✓ Comprehensive security measures (Authentication, anti-cheat, audit logs)
+✓ Optimistic UI updates with conflict resolution
+✓ Request queuing for offline support
+✓ Robust caching strategy with TTL and invalidation
+✓ Idempotent operations for safe retries
+✓ Extensive edge case handling
+✓ Performance optimized (indexing, caching, query optimization)
+✓ Future-extensible design (clan wars, quests, events)
+
+16.2 NEXT ACTIONS
+=================
+
+Immediate (This Week):
+  1. Review and approve architecture design
+  2. Set up backend infrastructure (server, database)
+  3. Begin Phase 1 implementation (foundation)
+  4. Create detailed API specifications
+
+Short-term (2-4 weeks):
+  1. Complete Phase 1-3 implementation
+  2. Internal testing and feedback
+  3. Optimize performance
+  4. Prepare for backend integration
+
+Medium-term (1-3 months):
+  1. Full implementation through Phase 7
+  2. Beta testing with internal team
+  3. Gather and incorporate feedback
+  4. Optimize based on real-world usage
+
+16.3 SUCCESS CRITERIA
+====================
+
+The clan system will be considered successful when:
+  ✓ Players can create and join clans
+  ✓ Clan chat functions smoothly
+  ✓ Leaderboard accurately reflects clan power
+  ✓ Supplies requests work reliably
+  ✓ Transfer cooldown prevents exploitation
+  ✓ System handles 10K+ concurrent players
+  ✓ No data loss or corruption
+  ✓ Player satisfaction > 8/10
+  ✓ Security audit passes
+  ✓ Performance meets targets (< 200ms latency)
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
+Questions? Contact the design team for clarification on any section.
+This document should be reviewed quarterly and updated with new insights
+from implementation and player feedback.
+
