@@ -8,6 +8,7 @@ Scene with example implementation.
 
 # Code
 /Assets/Code/*.*
+
 /Assets/Code/UI/*.*
 
 Contains all scripts (partial implementation of task). Implementation is very rudimentary and does not follow encapsulation best practices.
