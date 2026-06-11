@@ -1,7 +1,7 @@
 # MechaFortressClans
 Noxgames recruiting task
 
-# Main
+# Scenes
 /Assets/Scenes/Main.unity
 
 Scene with example implementation.
